@@ -4,6 +4,7 @@
  * 消费 Coat、Body；复用 <StageTag>、<FilterBar>、<StatBadge>、<EmptyPanel>。
  */
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   Alert,
   App as AntdApp,
@@ -35,13 +36,16 @@ import StatBadge from '@/components/common/StatBadge';
 import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
-import { useCoatStore } from '@/stores/coatStore';
+import { useCoatStore, GateBlockedError } from '@/stores/coatStore';
+import { useKilnStore } from '@/stores/kilnStore';
+import { ROUTES } from '@/router';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
   COLOR_NAME_OPTIONS,
   PAINT_TYPE_LABEL,
   PAINT_TYPE_OPTIONS,
+  SOURCE_UNKNOWN,
   createEmptyCoatDraft,
   type Coat,
   type CoatDraft,
@@ -49,6 +53,8 @@ import {
   type PaintType,
 } from '@/types/coat';
 import { BODY_SHAPE_LABEL } from '@/types/body';
+import { MOISTURE_LIMIT_PCT, MOISTURE_VERDICT_LABEL } from '@/types/kiln';
+import { GATE_TEXT } from '@/types/reconcile';
 import { suggestIntervalHours } from '@/utils/humidity';
 
 const FILTER_KEYS = ['paintType', 'state'] as const;
@@ -74,6 +80,10 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const gateOfBody = useCoatStore((state) => state.gateOfBody);
+  const receipts = useKilnStore((state) => state.receipts);
+  const moistureTests = useKilnStore((state) => state.tests);
+  const holds = useKilnStore((state) => state.holds);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -98,6 +108,18 @@ export default function CoatBoard() {
     [coats, bodyId],
   );
 
+  // 排道次 / 上漆闸门：依赖两头数据，任一变化都重算
+  const gate = useMemo(
+    () => (bodyId ? gateOfBody(bodyId) : null),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [bodyId, bodies, coats, receipts, moistureTests, holds, gateOfBody],
+  );
+  const gateOpen = gate?.kind === 'ok';
+  const bodyHolds = useMemo(
+    () => (bodyId ? holds.filter((hold) => hold.status === 'hold' && hold.bodyId === bodyId) : []),
+    [holds, bodyId],
+  );
+
   const filtered = useMemo(() => {
     const keyword = url.keyword.trim();
     const paintTypes = url.values.paintType ?? [];
@@ -119,6 +141,10 @@ export default function CoatBoard() {
   const openCreate = (): void => {
     if (!bodyId) {
       message.warning('请先选择或新建胎体');
+      return;
+    }
+    if (!gateOpen) {
+      message.warning(`暂不可排道次：${gate ? GATE_TEXT[gate.kind] : '闸门未就绪'}，复测达标后自动放回`);
       return;
     }
     setEditing(null);
@@ -147,14 +173,22 @@ export default function CoatBoard() {
   const submit = async (): Promise<void> => {
     const values = await form.validateFields();
     const payload: CoatDraft = { ...values };
-    if (editing) {
-      await updateCoat(editing.id, payload);
-      message.success(`已更新第 ${payload.seq} 道工序`);
-    } else {
-      await createCoat(payload);
-      message.success(`已新增第 ${payload.seq} 道工序`);
+    try {
+      if (editing) {
+        await updateCoat(editing.id, payload);
+        message.success(`已更新第 ${payload.seq} 道工序`);
+      } else {
+        await createCoat(payload);
+        message.success(`已新增第 ${payload.seq} 道工序`);
+      }
+      setOpen(false);
+    } catch (error) {
+      if (error instanceof GateBlockedError) {
+        message.warning(`先压着：${error.message}`);
+        return;
+      }
+      throw error;
     }
-    setOpen(false);
   };
 
   /** 拖拽重排：按落点重排并落库重编号 */
@@ -178,14 +212,40 @@ export default function CoatBoard() {
     message.success('道次顺序已更新并重编号');
   };
 
-  /** 状态推进校验：前一道未完成时禁止进入下一道 */
+  /** 状态推进校验：前一道未完成时禁止进入下一道；上头道漆前还须复测达标 */
   const handleAdvance = async (coat: Coat): Promise<void> => {
     const previous = bodyCoats.find((item) => item.seq === coat.seq - 1);
     if (previous && previous.state !== 'done') {
       message.warning(`第 ${previous.seq} 道尚未完成，禁止进入第 ${coat.seq} 道`);
       return;
     }
-    await advanceState(coat.id);
+    try {
+      await advanceState(coat.id);
+    } catch (error) {
+      if (error instanceof GateBlockedError) {
+        message.warning(`没晾透，先压着：${error.message}`);
+        return;
+      }
+      throw error;
+    }
+  };
+
+  /** 批量改状态：压着的待涂道次不参与上漆，先点出被压数量 */
+  const handleBatchState = async (): Promise<void> => {
+    const movingToPainted = batchState !== 'todo';
+    const selected = coats.filter((coat) => selectedIds.includes(coat.id));
+    const blocked = movingToPainted
+      ? selected.filter((coat) => coat.state === 'todo' && coat.held)
+      : [];
+    if (blocked.length > 0) {
+      message.warning(`${blocked.length} 道待涂道次含水率未达标被压排，不参与本次上漆；上了漆的道次不退回`);
+    }
+    await batchUpdate(selectedIds, { state: batchState });
+    const applied = selected.length - blocked.length;
+    if (applied > 0) {
+      message.success(`已把 ${applied} 道批量改为${COAT_STATE_LABEL[batchState]}`);
+    }
+    setSelectedIds([]);
   };
 
   const columns: ColumnsType<Coat> = [
@@ -212,13 +272,27 @@ export default function CoatBoard() {
     {
       title: '道次',
       dataIndex: 'seq',
-      width: 90,
+      width: 120,
       sorter: (a, b) => a.seq - b.seq,
       render: (seq: number, record) => (
-        <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
+        <Space size={4} direction="vertical" style={{ lineHeight: 1.2 }}>
+          <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
+          {record.held ? (
+            <Tooltip title="坯胎最近一次含水率复测未达标，该待涂道次压着等；复测达标后自动放回，上了漆的不退回">
+              <Tag color="red" style={{ marginInlineEnd: 0 }}>压排中</Tag>
+            </Tooltip>
+          ) : null}
+        </Space>
       ),
     },
     { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
+    {
+      title: '来源坯胎',
+      dataIndex: 'sourceCode',
+      width: 110,
+      render: (value: string | undefined) =>
+        value ? <Tag color={value === SOURCE_UNKNOWN ? 'default' : '#8c2f1f'}>{value}</Tag> : <Tag>未回填</Tag>,
+    },
     { title: '色名', dataIndex: 'colorName', width: 120 },
     { title: '涂刷日期', dataIndex: 'coatDate', width: 130, sorter: (a, b) => a.coatDate.localeCompare(b.coatDate) },
     {
@@ -273,7 +347,7 @@ export default function CoatBoard() {
             }))}
             onChange={(value: string) => setCurrentBodyId(value)}
           />
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate} disabled={!gateOpen}>
             新增道次
           </Button>
         </Space>
@@ -284,8 +358,47 @@ export default function CoatBoard() {
         <StatBadge label="完成率" value={`${stat?.coatPercent ?? 0}%`} percent={stat?.coatPercent ?? 0} tone="success" />
         <StatBadge label="当前道次" value={stat?.currentSeq ? `第 ${stat.currentSeq} 道` : '已完工'} tone="warning" />
         <StatBadge label="全局待复检" value={totals.recheck} suffix="道" tone="danger" />
-        <StatBadge label="荫干等待" value={stat?.dryingHours ?? 0} suffix="小时" tone="info" />
+        <StatBadge label="压排待涂" value={bodyCoats.filter((coat) => coat.held).length} suffix="道" tone="warning" />
       </div>
+
+      {gate && bodyId ? (
+        <Alert
+          style={{ marginBottom: 14 }}
+          showIcon
+          type={gate.kind === 'ok' ? 'success' : gate.kind === 'hold' ? 'error' : 'warning'}
+          message={
+            gate.kind === 'ok' && gate.test ? (
+              <span>
+                最近复测 {gate.test.testDate} 含水率 {gate.test.moisturePct}%（{MOISTURE_VERDICT_LABEL[gate.test.verdict]}
+                ，上限 {MOISTURE_LIMIT_PCT}%），<strong>可编排、可上头道漆</strong>
+              </span>
+            ) : gate.kind === 'waiting' && gate.test ? (
+              <span>
+                最近复测 {gate.test.testDate} 含水率 {gate.test.moisturePct}% 未达标（上限 {MOISTURE_LIMIT_PCT}%），
+                待涂道次<strong>压着等</strong>；复测达标后自动放回，已上漆道次不退回。
+                去 <Link to={ROUTES.kiln}>制胎间</Link> 登记复测
+              </span>
+            ) : gate.kind === 'none' ? (
+              <span>
+                这具坯胎还没有含水率复测，先<strong>压着等</strong>，去 <Link to={ROUTES.kiln}>制胎间</Link> 复测达标后再排道次
+              </span>
+            ) : (
+              <span>
+                对账挂起，<strong>等人判</strong>后才能编排：{gate.hold?.detail ?? '编号或复测结论对不上'}，去{' '}
+                <Link to={ROUTES.kiln}>制胎间对账挂起</Link> 处理
+              </span>
+            )
+          }
+        />
+      ) : null}
+      {bodyHolds.length > 1 ? (
+        <Alert
+          style={{ marginBottom: 14 }}
+          type="error"
+          showIcon
+          message={`该坯胎有 ${bodyHolds.length} 条对账挂起等人判`}
+        />
+      ) : null}
 
       {suggestion && suggestion.sourceCode ? (
         <Alert
@@ -349,12 +462,7 @@ export default function CoatBoard() {
             <Button
               size="small"
               disabled={selectedIds.length === 0}
-              onClick={() =>
-                void batchUpdate(selectedIds, { state: batchState }).then(() => {
-                  message.success(`已批量改为${COAT_STATE_LABEL[batchState]}`);
-                  setSelectedIds([]);
-                })
-              }
+              onClick={() => void handleBatchState()}
             >
               批量改状态
             </Button>
@@ -395,6 +503,10 @@ export default function CoatBoard() {
             rowSelection={{
               selectedRowKeys: selectedIds,
               onChange: (keys) => setSelectedIds(keys.map((key) => String(key))),
+              getCheckboxProps: (record) => ({
+                disabled: record.held === true,
+                title: record.held ? '含水率未达标压排中，不参与批量上漆' : undefined,
+              }),
             }}
             rowClassName={(record) => (record.id === dragId ? 'gb-row-dragging' : '')}
           />

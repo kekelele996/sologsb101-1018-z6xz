@@ -5,9 +5,26 @@
 import { create } from 'zustand';
 import { db, createId } from '@/utils/db';
 import type { Coat, CoatDraft, CoatState, PaintType } from '@/types/coat';
-import { nextCoatState } from '@/types/coat';
+import { nextCoatState, SOURCE_UNKNOWN } from '@/types/coat';
 import { suggestIntervalHours, suggestPaintType } from '@/utils/humidity';
+import { evaluateGate, type GateResult } from '@/utils/reconcile';
+import { GATE_TEXT } from '@/types/reconcile';
 import { useBodyStore } from './bodyStore';
+import { useKilnStore } from './kilnStore';
+
+/** 闸门未放行时抛出，页面捕获后提示「压着等」，不写入 */
+export class GateBlockedError extends Error {}
+
+/** 排道次 / 上漆前查这具坯胎最近一次复测与对账挂起；不放行则抛错 */
+function assertGateOpen(bodyId: string): void {
+  const body = useBodyStore.getState().bodies.find((item) => item.id === bodyId);
+  if (!body) throw new GateBlockedError('胎体不存在');
+  const { receipts, tests, holds } = useKilnStore.getState();
+  const gate = evaluateGate(body, useCoatStore.getState().coats, receipts, tests, holds);
+  if (gate.kind !== 'ok') {
+    throw new GateBlockedError(GATE_TEXT[gate.kind]);
+  }
+}
 
 export interface PaintSuggestion {
   paintType: PaintType;
@@ -33,6 +50,8 @@ interface CoatStoreState {
   nextSeq: (bodyId: string) => number;
   /** 同器型自动带出上次漆种与间隔建议 */
   suggestForBody: (bodyId: string) => PaintSuggestion;
+  /** 某具坯胎的上漆闸门（最近复测 + 对账挂起） */
+  gateOfBody: (bodyId: string) => GateResult;
 }
 
 export const useCoatStore = create<CoatStoreState>((set, get) => ({
@@ -59,10 +78,17 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
   },
 
   async createCoat(draft) {
+    // 排新道次前先看这具坯胎最近一次复测；没达标的压着等
+    assertGateOpen(draft.bodyId);
     const now = Date.now();
-    const row: Coat = { ...draft, id: createId('coat'), createdAt: now, updatedAt: now };
+    const body = useBodyStore.getState().bodies.find((item) => item.id === draft.bodyId);
+    // 新道次按坯胎编号带来源编号，作为两边对账键
+    const sourceCode = body?.code.trim() || SOURCE_UNKNOWN;
+    const row: Coat = { ...draft, sourceCode, held: false, id: createId('coat'), createdAt: now, updatedAt: now };
     await db.coats.put(row);
     await get().loadCoats();
+    // 道次变化后重跑对账（如带来源编号影响「来源不明」挂起）；失败不影响道次已落库
+    await useKilnStore.getState().runReconcile();
     return row;
   },
 
@@ -88,11 +114,22 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
   async batchUpdate(ids, patch) {
     if (ids.length === 0) return;
     const now = Date.now();
-    const rows = get()
-      .coats.filter((coat) => ids.includes(coat.id))
-      .map((coat) => ({ ...coat, ...patch, updatedAt: now }));
+    // 批量上漆（待涂 → 已上漆及以后）：压着的待涂道次不退回也不参与，只放行闸门开着的
+    const movingToPainted = patch.state !== undefined && patch.state !== 'todo';
+    const allowed = get().coats.filter((coat) => {
+      if (!ids.includes(coat.id)) return false;
+      if (!movingToPainted || coat.state !== 'todo') return true;
+      if (coat.held) return false;
+      const body = useBodyStore.getState().bodies.find((item) => item.id === coat.bodyId);
+      if (!body) return false;
+      const { receipts, tests, holds } = useKilnStore.getState();
+      return evaluateGate(body, get().coats, receipts, tests, holds).kind === 'ok';
+    });
+    if (allowed.length === 0) return;
+    const rows = allowed.map((coat) => ({ ...coat, ...patch, updatedAt: now }));
     await db.coats.bulkPut(rows);
     await get().loadCoats();
+    await useKilnStore.getState().runReconcile();
   },
 
   async advanceState(id) {
@@ -100,7 +137,14 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
     if (!coat) return;
     const next = nextCoatState(coat.state);
     if (next === coat.state) return;
+    // 待涂 → 已涂 即上头道漆：排道次前必须复测达标；已上漆的后续推进不退回
+    if (coat.state === 'todo') {
+      if (coat.held) throw new GateBlockedError(GATE_TEXT.waiting);
+      assertGateOpen(coat.bodyId);
+    }
     await get().updateCoat(id, { state: next });
+    // 上漆后重跑对账：若最近复测不达标会生成「复测结论对不上」挂起
+    await useKilnStore.getState().runReconcile();
   },
 
   async markRecheck(bodyId, recheck) {
@@ -147,6 +191,13 @@ export const useCoatStore = create<CoatStoreState>((set, get) => ({
       sourceCode: previousBody?.code ?? '',
       sourceColor: previousCoat?.colorName ?? '',
     };
+  },
+
+  gateOfBody(bodyId) {
+    const body = useBodyStore.getState().bodies.find((item) => item.id === bodyId);
+    if (!body) return { kind: 'hold' } as GateResult;
+    const { receipts, tests, holds } = useKilnStore.getState();
+    return evaluateGate(body, get().coats, receipts, tests, holds);
   },
 }));
 

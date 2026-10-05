@@ -6,10 +6,13 @@ import type { Body } from '@/types/body';
 import type { Coat } from '@/types/coat';
 import type { Room } from '@/types/room';
 import type { Inspect } from '@/types/inspect';
+import type { MoistureTest } from '@/types/kiln';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL } from '@/types/body';
 import { COAT_STATE_LABEL, PAINT_TYPE_LABEL } from '@/types/coat';
 import { ROOM_VERDICT_LABEL } from '@/types/room';
 import { INSPECT_VERDICT_LABEL } from '@/types/inspect';
+import { MOISTURE_VERDICT_LABEL } from '@/types/kiln';
+import { latestTestOf } from './reconcile';
 import type { LacquerSnapshot } from './db';
 
 /** 触发浏览器下载 */
@@ -96,13 +99,14 @@ export function exportReworkList(
   return filename;
 }
 
-/** 工序台账 CSV（全部胎体 + 道次 + 荫房） */
-export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): string {
-  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '待复检', '荫房日期', '温度(℃)', '湿度(%)', '判定'];
+/** 工序台账 CSV（全部胎体 + 道次 + 荫房 + 最近复测） */
+export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[], moistureTests: MoistureTest[] = []): string {
+  const header = ['胎体编号', '材质', '器型', '尺寸(mm)', '委托/藏家', '道次', '漆种', '色名', '涂刷日期', '湿膜(μm)', '道次状态', '压排', '待复检', '最近复测含水率(%)', '复测结论', '荫房日期', '温度(℃)', '湿度(%)', '判定'];
   const lines: string[] = [header.map(csvCell).join(',')];
   bodies.forEach((body) => {
     const bodyCoats = coats.filter((item) => item.bodyId === body.id).sort((a, b) => a.seq - b.seq);
     const bodyRooms = rooms.filter((item) => item.bodyId === body.id);
+    const latest = latestTestOf(body.code, moistureTests);
     const rowCount = Math.max(bodyCoats.length, bodyRooms.length, 1);
     for (let index = 0; index < rowCount; index += 1) {
       const coat = bodyCoats[index];
@@ -120,7 +124,10 @@ export function exportLedgerCsv(bodies: Body[], coats: Coat[], rooms: Room[]): s
           coat ? coat.coatDate : '',
           coat ? coat.thicknessUm : '',
           coat ? COAT_STATE_LABEL[coat.state] : '',
+          coat ? (coat.held ? '压排中' : '') : '',
           coat ? (coat.needRecheck ? '是' : '否') : '',
+          index === 0 ? (latest ? latest.moisturePct : '') : '',
+          index === 0 ? (latest ? MOISTURE_VERDICT_LABEL[latest.verdict] : '暂无复测') : '',
           room ? room.date : '',
           room ? room.tempC : '',
           room ? room.humidityPct : '',

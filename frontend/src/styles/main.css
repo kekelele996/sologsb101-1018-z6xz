@@ -196,6 +196,16 @@ body::before {
   border-top: 2px dashed var(--gb-red);
 }
 
+/* 对账挂起行：等人判 */
+.gb-row-hold {
+  background: rgba(176, 58, 46, 0.06) !important;
+}
+
+/* 压排中的待涂道次：整行置灰提示 */
+.ant-table-row .gb-row-held {
+  background: rgba(140, 132, 121, 0.08);
+}
+
 /* 器型示意区：镶嵌纹饰叠加显示 */
 .gb-vessel {
   position: relative;

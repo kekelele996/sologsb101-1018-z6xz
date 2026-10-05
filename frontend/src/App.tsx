@@ -11,12 +11,14 @@ import {
   CloudOutlined,
   DashboardOutlined,
   ExportOutlined,
+  FireOutlined,
   FormatPainterOutlined,
   HighlightOutlined,
 } from '@ant-design/icons';
 import { ROUTES } from './router';
 import { useBodyStore } from './stores/bodyStore';
 import { useCoatStore } from './stores/coatStore';
+import { useKilnStore } from './stores/kilnStore';
 import { useRoomStore } from './stores/roomStore';
 import { initDatabase } from './utils/db';
 import { BODY_MATERIAL_LABEL, BODY_SHAPE_LABEL, BODY_STATE_LABEL } from './types/body';
@@ -35,6 +37,9 @@ export default function App() {
   const loadCoats = useCoatStore((state) => state.loadCoats);
   const rooms = useRoomStore((state) => state.rooms);
   const loadRooms = useRoomStore((state) => state.loadRooms);
+  const receipts = useKilnStore((state) => state.receipts);
+  const loadKiln = useKilnStore((state) => state.loadKiln);
+  const runReconcile = useKilnStore((state) => state.runReconcile);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,7 +47,10 @@ export default function App() {
       try {
         await initDatabase();
         if (cancelled) return;
-        await Promise.all([loadBodies(), loadCoats(), loadRooms()]);
+        // 髹涂那头先载入，再载入制胎间并跑一次对账，压排 / 挂起据此生成
+        await Promise.all([loadBodies(), loadCoats(), loadRooms(), loadKiln()]);
+        if (cancelled) return;
+        await runReconcile();
       } catch (error) {
         if (cancelled) return;
         message.error(`本地数据库初始化失败：${error instanceof Error ? error.message : '未知错误'}`);
@@ -51,20 +59,22 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [loadBodies, loadCoats, loadRooms, message]);
+  }, [loadBodies, loadCoats, loadRooms, loadKiln, runReconcile, message]);
 
   const currentBody = bodies.find((body) => body.id === currentBodyId) ?? null;
-  const selectedKey = location.pathname.startsWith('/coats')
+  const selectedKey = location.pathname.startsWith('/kiln')
+    ? ROUTES.kiln
+    : location.pathname.startsWith('/coats')
     ? ROUTES.coats
     : location.pathname.startsWith('/rooms')
-      ? ROUTES.rooms
-      : location.pathname.startsWith('/polish')
-        ? ROUTES.polish
-        : location.pathname.startsWith('/inlays')
-          ? ROUTES.inlays
-          : location.pathname.startsWith('/export')
-            ? ROUTES.export
-            : ROUTES.bodies;
+    ? ROUTES.rooms
+    : location.pathname.startsWith('/polish')
+    ? ROUTES.polish
+    : location.pathname.startsWith('/inlays')
+    ? ROUTES.inlays
+    : location.pathname.startsWith('/export')
+    ? ROUTES.export
+    : ROUTES.bodies;
 
   return (
     <Layout style={{ minHeight: '100vh', background: 'transparent' }}>
@@ -85,6 +95,7 @@ export default function App() {
           onClick={({ key }) => navigate(key)}
           items={[
             { key: ROUTES.bodies, icon: <AppstoreOutlined />, label: '胎体与器型' },
+            { key: ROUTES.kiln, icon: <FireOutlined />, label: '制胎间入库 / 复测' },
             { key: ROUTES.coats, icon: <FormatPainterOutlined />, label: '髹涂道次' },
             { key: ROUTES.rooms, icon: <CloudOutlined />, label: '荫房记录' },
             { key: ROUTES.polish, icon: <BgColorsOutlined />, label: '打磨推光' },
@@ -97,6 +108,7 @@ export default function App() {
             <span>
               <DashboardOutlined /> 胎体 {bodies.length} 件
             </span>
+            <span>坯胎入库 {receipts.length} 张</span>
             <span>髹涂道次 {coats.length} 道</span>
             <span>荫房记录 {rooms.length} 条</span>
           </Space>

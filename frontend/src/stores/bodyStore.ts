@@ -6,6 +6,7 @@ import { create } from 'zustand';
 import { db, createId, readUiPrefs, writeUiPrefs, removeBodyCascade } from '@/utils/db';
 import type { Body, BodyDraft, BodyMaterial, BodyShape } from '@/types/body';
 import { nextBodyState } from '@/types/body';
+import { useKilnStore } from './kilnStore';
 
 export interface BodyFilters {
   keyword: string;
@@ -82,18 +83,33 @@ export const useBodyStore = create<BodyStoreState>((set, get) => ({
     await db.bodies.put(row);
     await get().loadBodies();
     get().setCurrentBodyId(row.id);
+    // 建档这头先落库；制胎间那头对账随后再跑，对账失败不回滚建档
+    await useKilnStore.getState().runReconcile();
     return row;
   },
 
   async updateBody(id, patch) {
+    const prev = get().bodies.find((body) => body.id === id);
     await db.bodies.update(id, { ...patch, updatedAt: Date.now() } as never);
     await get().loadBodies();
+    // 编号改了：把该胎体道次的来源编号（对账键）一起回填过去
+    if (patch.code && prev && patch.code.trim() !== prev.code.trim()) {
+      const linked = await db.coats.where('bodyId').equals(id).toArray();
+      if (linked.length > 0) {
+        const now = Date.now();
+        await db.coats.bulkPut(
+          linked.map((coat) => ({ ...coat, sourceCode: patch.code!.trim(), updatedAt: now })),
+        );
+      }
+    }
+    await useKilnStore.getState().runReconcile();
   },
 
   async removeBody(id) {
     await removeBodyCascade(id);
     if (get().currentBodyId === id) get().setCurrentBodyId(null);
     await get().loadBodies();
+    await useKilnStore.getState().runReconcile();
   },
 
   async advanceBodyState(id) {

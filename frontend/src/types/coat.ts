@@ -27,9 +27,22 @@ export interface Coat {
   state: CoatState;
   /** 荫房判定异常时回写的「待复检」标记 */
   needRecheck: boolean;
+  /**
+   * 来源坯胎编号：制胎间那头开出的编号，两边按它对账。
+   * 旧数据没有编号，v3 升级时按坯胎编号回填；回填不到标为「来源不明」。
+   */
+  sourceCode?: string;
+  /**
+   * 压排标记：排道次前查最近一次含水率复测，未达标 / 无复测时压着（true）；
+   * 复测达标后自动放回可编排（false）。已上漆的道次不退回，故不压。
+   */
+  held?: boolean;
   createdAt: number;
   updatedAt: number;
 }
+
+/** 旧道次回填不到坯胎编号时打的来源标记 */
+export const SOURCE_UNKNOWN = '来源不明';
 
 export type CoatDraft = Omit<Coat, 'id' | 'createdAt' | 'updatedAt'>;
 

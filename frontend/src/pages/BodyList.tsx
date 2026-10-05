@@ -32,7 +32,9 @@ import { useIdbTable } from '@/hooks/useIdbTable';
 import { ROUTES } from '@/router';
 import { DEFAULT_BODY_FILTERS, selectFilteredBodies, useBodyStore } from '@/stores/bodyStore';
 import { useCoatStore } from '@/stores/coatStore';
+import { useKilnStore } from '@/stores/kilnStore';
 import type { Inlay } from '@/types/inlay';
+import { MOISTURE_VERDICT_COLOR, MOISTURE_VERDICT_LABEL } from '@/types/kiln';
 import {
   BODY_MATERIAL_LABEL,
   BODY_MATERIAL_OPTIONS,
@@ -74,6 +76,8 @@ export default function BodyList() {
   const inlayTable = useIdbTable<Inlay>((database) => database.inlays, { sortByUpdatedAt: false });
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const coats = useCoatStore((state) => state.coats);
+  const latestTestOfCode = useKilnStore((state) => state.latestTestOfCode);
+  const holds = useKilnStore((state) => state.holds);
 
   const url = useFilterQuery(FILTER_KEYS);
   const [editing, setEditing] = useState<Body | null>(null);
@@ -182,6 +186,9 @@ export default function BodyList() {
             {filtered.map((body) => {
               const stat = progressOf(body.id);
               const recheck = coats.some((coat) => coat.bodyId === body.id && coat.needRecheck);
+              const held = coats.some((coat) => coat.bodyId === body.id && coat.held);
+              const latestTest = latestTestOfCode(body.code);
+              const bodyHold = holds.find((hold) => hold.status === 'hold' && hold.bodyId === body.id);
               return (
                 <Col key={body.id} xs={24} md={12} xl={8}>
                   <Card
@@ -219,6 +226,21 @@ export default function BodyList() {
                         {stat.currentSeq > 0 ? ` · 当前第 ${stat.currentSeq} 道` : ' · 全部完成'}
                       </Typography.Text>
                       <Typography.Text type="secondary">当前工序：{currentCoatText(body.id)}</Typography.Text>
+                      <Space size={6} wrap>
+                        <Typography.Text type="secondary">最近复测：</Typography.Text>
+                        {latestTest ? (
+                          <>
+                            <Tag color={MOISTURE_VERDICT_COLOR[latestTest.verdict]}>
+                              {MOISTURE_VERDICT_LABEL[latestTest.verdict]} {latestTest.moisturePct}%
+                            </Tag>
+                            <Typography.Text type="secondary" style={{ fontSize: 12 }}>{latestTest.testDate}</Typography.Text>
+                          </>
+                        ) : (
+                          <Tag>暂无复测</Tag>
+                        )}
+                        {held ? <Tag color="red">待涂道次压排中</Tag> : null}
+                        {bodyHold ? <Tag color="orange">对账挂起</Tag> : null}
+                      </Space>
                       <Typography.Text type="secondary">最近荫房：{stat.lastRoomVerdict}</Typography.Text>
                       <Typography.Text type="secondary">
                         荫干等待 {stat.dryingHours} 小时 · 荫房超标 {stat.roomOverCount} 次
