@@ -13,6 +13,12 @@ export interface Coat {
   id: string;
   /** 所属胎体 id */
   bodyId: string;
+  /**
+   * 坯胎编号快照（制胎间对账凭据）。
+   * 建道次时从所属胎体 code 抄入；与胎体现行编号不一致即为「编号对不上」，挂起等判。
+   * 旧数据升级回填；对不上已删除胎体的记为「来源不明」。
+   */
+  bodyCode: string;
   /** 道次序号，从 1 开始连续整数 */
   seq: number;
   /** 漆种 */
@@ -84,6 +90,8 @@ export function nextCoatState(state: CoatState): CoatState {
 export function createEmptyCoatDraft(bodyId: string, seq: number): CoatDraft {
   return {
     bodyId,
+    // 建道次时由 coatStore 按所属胎体编号回填，表单不需要手填
+    bodyCode: '',
     seq,
     paintType: 'raw',
     colorName: '漆黑',

@@ -4,9 +4,11 @@
  * 消费 Coat、Body；复用 <StageTag>、<FilterBar>、<StatBadge>、<EmptyPanel>。
  */
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Alert,
   App as AntdApp,
+  Badge,
   Button,
   Card,
   Form,
@@ -35,7 +37,9 @@ import StatBadge from '@/components/common/StatBadge';
 import StageTag from '@/components/common/StageTag';
 import { useCoatProgress } from '@/hooks/useCoatProgress';
 import { useBodyStore } from '@/stores/bodyStore';
-import { useCoatStore } from '@/stores/coatStore';
+import { GateBlockedError, useCoatStore } from '@/stores/coatStore';
+import { useBlankStore } from '@/stores/blankStore';
+import { ROUTES } from '@/router';
 import {
   COAT_STATE_LABEL,
   COAT_STATE_OPTIONS,
@@ -59,6 +63,7 @@ const FILTER_SELECTS: ReadonlyArray<FilterSelectConfig> = [
 ];
 
 export default function CoatBoard() {
+  const navigate = useNavigate();
   const { message } = AntdApp.useApp();
   const [form] = Form.useForm<CoatDraft>();
 
@@ -74,6 +79,9 @@ export default function CoatBoard() {
   const reorderCoats = useCoatStore((state) => state.reorderCoats);
   const nextSeq = useCoatStore((state) => state.nextSeq);
   const suggestForBody = useCoatStore((state) => state.suggestForBody);
+  const checkGate = useCoatStore((state) => state.checkGate);
+  const blanks = useBlankStore((state) => state.blanks);
+  const loadBlanks = useBlankStore((state) => state.loadBlanks);
 
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const url = useFilterQuery(FILTER_KEYS);
@@ -98,6 +106,12 @@ export default function CoatBoard() {
     [coats, bodyId],
   );
 
+  // 制胎间闸门：排道次前看这具坯胎最近一次复测。已上漆的不退回（后续道次放行）
+  const firstCoatGate = bodyId ? checkGate(bodyId, false) : null;
+  const paintGate = bodyId ? checkGate(bodyId, true) : null;
+  const hasPainted = bodyCoats.some((coat) => coat.state !== 'todo');
+  const blankForBody = bodyId ? blanks.find((blank) => blank.matchedBodyId === bodyId || blank.code === activeBody?.code) : undefined;
+
   const filtered = useMemo(() => {
     const keyword = url.keyword.trim();
     const paintTypes = url.values.paintType ?? [];
@@ -121,6 +135,11 @@ export default function CoatBoard() {
       message.warning('请先选择或新建胎体');
       return;
     }
+    // 头道漆：没有任何道次时，必须过制胎间闸门；已有道次（含未涂）时不再拦编排
+    if (bodyCoats.length === 0 && firstCoatGate && firstCoatGate.kind !== 'allowed') {
+      message.warning(firstCoatGate.message);
+      return;
+    }
     setEditing(null);
     form.setFieldsValue({
       ...createEmptyCoatDraft(bodyId, nextSeq(bodyId)),
@@ -133,6 +152,7 @@ export default function CoatBoard() {
     setEditing(coat);
     form.setFieldsValue({
       bodyId: coat.bodyId,
+      bodyCode: coat.bodyCode,
       seq: coat.seq,
       paintType: coat.paintType,
       colorName: coat.colorName,
@@ -146,15 +166,22 @@ export default function CoatBoard() {
 
   const submit = async (): Promise<void> => {
     const values = await form.validateFields();
-    const payload: CoatDraft = { ...values };
-    if (editing) {
-      await updateCoat(editing.id, payload);
-      message.success(`已更新第 ${payload.seq} 道工序`);
-    } else {
-      await createCoat(payload);
-      message.success(`已新增第 ${payload.seq} 道工序`);
+    // bodyCode 不由表单填写：新增时按当前胎体编号（=坯胎编号）带出
+    const payload: CoatDraft = { ...values, bodyCode: editing ? values.bodyCode : activeBody?.code ?? '' };
+    try {
+      if (editing) {
+        await updateCoat(editing.id, payload);
+        message.success(`已更新第 ${payload.seq} 道工序`);
+      } else {
+        await createCoat(payload);
+        message.success(`已新增第 ${payload.seq} 道工序`);
+      }
+      setOpen(false);
+    } catch (error) {
+      // 制胎间闸门拦截：道次未创建，弹窗保留给用户查看原因
+      if (error instanceof GateBlockedError) message.error(error.message);
+      else throw error;
     }
-    setOpen(false);
   };
 
   /** 拖拽重排：按落点重排并落库重编号 */
@@ -178,14 +205,24 @@ export default function CoatBoard() {
     message.success('道次顺序已更新并重编号');
   };
 
-  /** 状态推进校验：前一道未完成时禁止进入下一道 */
+  /** 状态推进校验：前一道未完成时禁止进入下一道；上头道漆前再过含水率/编号闸门 */
   const handleAdvance = async (coat: Coat): Promise<void> => {
     const previous = bodyCoats.find((item) => item.seq === coat.seq - 1);
     if (previous && previous.state !== 'done') {
       message.warning(`第 ${previous.seq} 道尚未完成，禁止进入第 ${coat.seq} 道`);
       return;
     }
-    await advanceState(coat.id);
+    try {
+      await advanceState(coat.id);
+    } catch (error) {
+      if (error instanceof GateBlockedError) {
+        message.error(error.message);
+        // 闸门状态可能刚在制胎间变更，刷新本页对账数据
+        void loadBlanks();
+      } else {
+        throw error;
+      }
+    }
   };
 
   const columns: ColumnsType<Coat> = [
@@ -218,7 +255,27 @@ export default function CoatBoard() {
         <StageTag state={record.state} seq={seq} needRecheck={record.needRecheck} />
       ),
     },
-    { title: '漆种', dataIndex: 'paintType', width: 100, render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag> },
+    {
+      title: '漆种',
+      dataIndex: 'paintType',
+      width: 100,
+      render: (value: PaintType) => <Tag>{PAINT_TYPE_LABEL[value]}</Tag>,
+    },
+    {
+      title: '坯胎编号',
+      dataIndex: 'bodyCode',
+      width: 120,
+      render: (value: string) => {
+        const mismatch = Boolean(value) && value !== activeBody?.code;
+        return (
+          <Tooltip title={mismatch ? '该道次坯胎编号与胎体编号对不上，已挂起等判' : '与制胎间入库单按此编号对账'}>
+            <Tag color={mismatch || value === '来源不明' ? 'error' : '#8c2f1f'} style={{ marginInlineStart: 0 }}>
+              {mismatch ? <Badge status="error" text={value} /> : value || '未记录'}
+            </Tag>
+          </Tooltip>
+        );
+      },
+    },
     { title: '色名', dataIndex: 'colorName', width: 120 },
     { title: '涂刷日期', dataIndex: 'coatDate', width: 130, sorter: (a, b) => a.coatDate.localeCompare(b.coatDate) },
     {
@@ -273,7 +330,14 @@ export default function CoatBoard() {
             }))}
             onChange={(value: string) => setCurrentBodyId(value)}
           />
-          <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={openCreate}
+            disabled={
+              bodyCoats.length === 0 && firstCoatGate !== null && firstCoatGate.kind !== 'allowed'
+            }
+          >
             新增道次
           </Button>
         </Space>
@@ -307,6 +371,67 @@ export default function CoatBoard() {
               带出建议
             </Button>
           }
+        />
+      ) : null}
+
+      {/* 制胎间闸门：排道次 / 上头道漆前先看坯胎最近一次复测 */}
+      {bodyId && !hasPainted && firstCoatGate ? (
+        firstCoatGate.kind === 'allowed' ? (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginBottom: 14 }}
+            message={
+              blankForBody
+                ? `坯胎 ${activeBody?.code} 最近复测 ${blankForBody.lastMoisturePct ?? '—'}%（${
+                    blankForBody.lastRetestDate ?? '未注明日期'
+                  }）结论合格，可编排头道漆`
+                : `坯胎 ${activeBody?.code} 已过制胎间闸门，可编排头道漆`
+            }
+          />
+        ) : (
+          <Alert
+            type={firstCoatGate.kind === 'held' ? 'error' : 'warning'}
+            showIcon
+            style={{ marginBottom: 14 }}
+            message={
+              firstCoatGate.kind === 'held'
+                ? `挂起等人判：${firstCoatGate.message}`
+                : `压着等：${firstCoatGate.message}`
+            }
+            description={
+              firstCoatGate.kind === 'held'
+                ? '请先到「制胎间 · 坯胎入库」页处理编号或复测结论异议，上了漆的道次不会退回。'
+                : '复测达标后入库单会自动放回可编排；编排按钮此时锁定。'
+            }
+            action={
+              <Button size="small" type={firstCoatGate.kind === 'held' ? 'primary' : 'default'} onClick={() => navigate(ROUTES.blanks)}>
+                去制胎间处理
+              </Button>
+            }
+          />
+        )
+      ) : null}
+      {bodyId && hasPainted && paintGate && paintGate.kind !== 'allowed' ? (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`编号对账异常：${paintGate.message}`}
+          description="已上漆道次不退回；请先到制胎间判明编号归属。"
+          action={
+            <Button size="small" type="primary" onClick={() => navigate(ROUTES.blanks)}>
+              去制胎间处理
+            </Button>
+          }
+        />
+      ) : null}
+      {bodyId && hasPainted && paintGate?.kind === 'allowed' ? (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 14 }}
+          message={`坯胎 ${activeBody?.code} 已上漆，后续道次按既有流程编排（已上漆道次不退回）`}
         />
       ) : null}
 
@@ -350,10 +475,14 @@ export default function CoatBoard() {
               size="small"
               disabled={selectedIds.length === 0}
               onClick={() =>
-                void batchUpdate(selectedIds, { state: batchState }).then(() => {
-                  message.success(`已批量改为${COAT_STATE_LABEL[batchState]}`);
-                  setSelectedIds([]);
-                })
+                void batchUpdate(selectedIds, { state: batchState })
+                  .then(() => {
+                    message.success(`已批量改为${COAT_STATE_LABEL[batchState]}`);
+                    setSelectedIds([]);
+                  })
+                  .catch((error: unknown) => {
+                    if (error instanceof GateBlockedError) message.warning(error.message);
+                  })
               }
             >
               批量改状态
@@ -396,7 +525,12 @@ export default function CoatBoard() {
               selectedRowKeys: selectedIds,
               onChange: (keys) => setSelectedIds(keys.map((key) => String(key))),
             }}
-            rowClassName={(record) => (record.id === dragId ? 'gb-row-dragging' : '')}
+            rowClassName={(record) => {
+              const classes: string[] = [];
+              if (record.id === dragId) classes.push('gb-row-dragging');
+              if (record.bodyCode && record.bodyCode !== activeBody?.code) classes.push('gb-row-held');
+              return classes.join(' ');
+            }}
           />
         )}
       </Card>

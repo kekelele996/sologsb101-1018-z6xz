@@ -74,6 +74,7 @@ export default function BodyList() {
   const inlayTable = useIdbTable<Inlay>((database) => database.inlays, { sortByUpdatedAt: false });
   const { progressOf, currentCoatText, totals } = useCoatProgress();
   const coats = useCoatStore((state) => state.coats);
+  const checkGate = useCoatStore((state) => state.checkGate);
 
   const url = useFilterQuery(FILTER_KEYS);
   const [editing, setEditing] = useState<Body | null>(null);
@@ -182,6 +183,9 @@ export default function BodyList() {
             {filtered.map((body) => {
               const stat = progressOf(body.id);
               const recheck = coats.some((coat) => coat.bodyId === body.id && coat.needRecheck);
+              const bodyCoats = coats.filter((coat) => coat.bodyId === body.id);
+              const painted = bodyCoats.some((coat) => coat.state !== 'todo');
+              const gate = checkGate(body.id, painted);
               return (
                 <Col key={body.id} xs={24} md={12} xl={8}>
                   <Card
@@ -219,6 +223,17 @@ export default function BodyList() {
                         {stat.currentSeq > 0 ? ` · 当前第 ${stat.currentSeq} 道` : ' · 全部完成'}
                       </Typography.Text>
                       <Typography.Text type="secondary">当前工序：{currentCoatText(body.id)}</Typography.Text>
+                      {gate.kind === 'allowed' && !painted && gate.blank ? (
+                        <Typography.Text type="success">
+                          含水率复测 {gate.blank.lastMoisturePct ?? '—'}% 达标，可上头道漆
+                        </Typography.Text>
+                      ) : null}
+                      {gate.kind === 'waiting' ? (
+                        <Typography.Text type="warning">制胎间：{gate.message}</Typography.Text>
+                      ) : null}
+                      {gate.kind === 'held' ? (
+                        <Typography.Text type="danger">挂起等判：{gate.message}</Typography.Text>
+                      ) : null}
                       <Typography.Text type="secondary">最近荫房：{stat.lastRoomVerdict}</Typography.Text>
                       <Typography.Text type="secondary">
                         荫干等待 {stat.dryingHours} 小时 · 荫房超标 {stat.roomOverCount} 次

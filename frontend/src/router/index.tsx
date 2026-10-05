@@ -1,6 +1,6 @@
 /**
- * 路由表（与提示词逐字一致）
- * /bodies、/coats、/rooms、/polish、/inlays、/export
+ * 路由表
+ * /blanks（制胎间：坯胎入库 + 含水率复测）、/bodies、/coats、/rooms、/polish、/inlays、/export
  * 页面按路由懒加载，构建时自动分包。
  */
 import { Suspense, lazy, type ReactNode } from 'react';
@@ -8,6 +8,7 @@ import { Navigate, type RouteObject } from 'react-router-dom';
 import { Skeleton } from 'antd';
 import App from '../App';
 
+const BlankIntake = lazy(() => import('../pages/BlankIntake'));
 const BodyList = lazy(() => import('../pages/BodyList'));
 const CoatBoard = lazy(() => import('../pages/CoatBoard'));
 const RoomLog = lazy(() => import('../pages/RoomLog'));
@@ -17,6 +18,7 @@ const ExportView = lazy(() => import('../pages/ExportView'));
 
 /** ROUTES 常量：页面与导航统一引用，避免散落硬编码 */
 export const ROUTES = {
+  blanks: '/blanks',
   bodies: '/bodies',
   coats: '/coats',
   rooms: '/rooms',
@@ -46,6 +48,7 @@ export const appRoutes: RouteObject[] = [
     element: <App />,
     children: [
       { index: true, element: <Navigate to={ROUTES.bodies} replace /> },
+      { path: 'blanks', element: withSuspense(<BlankIntake />) },
       { path: 'bodies', element: withSuspense(<BodyList />) },
       { path: 'coats', element: withSuspense(<CoatBoard />) },
       { path: 'rooms', element: withSuspense(<RoomLog />) },

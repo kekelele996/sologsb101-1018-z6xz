@@ -196,6 +196,15 @@ body::before {
   border-top: 2px dashed var(--gb-red);
 }
 
+/* 编号 / 复测结论对不上而挂起的道次行 */
+.gb-row-held > td {
+  background: rgba(176, 58, 46, 0.07) !important;
+}
+
+.gb-row-held:hover > td {
+  background: rgba(176, 58, 46, 0.12) !important;
+}
+
 /* 器型示意区：镶嵌纹饰叠加显示 */
 .gb-vessel {
   position: relative;
